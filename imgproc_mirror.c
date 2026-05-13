@@ -1,0 +1,295 @@
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <stdint.h>
+
+#pragma pack(push,1)
+typedef struct {
+    uint16_t bfType;
+    uint32_t bfSize;
+    uint16_t bfReserved1;
+    uint16_t bfReserved2;
+    uint32_t bfOffBits;
+} BITMAPFILEHEADER;
+
+typedef struct {
+    uint32_t biSize;
+    int32_t  biWidth;
+    int32_t  biHeight;
+    uint16_t biPlanes;
+    uint16_t biBitCount;
+    uint32_t biCompression;
+    uint32_t biSizeImage;
+    int32_t  biXPelsPerMeter;
+    int32_t  biYPelsPerMeter;
+    uint32_t biClrUsed;
+    uint32_t biClrImportant;
+} BITMAPINFOHEADER;
+#pragma pack(pop)
+
+typedef struct {
+    BITMAPFILEHEADER fileHeader;
+    BITMAPINFOHEADER infoHeader;
+    unsigned char *palette;
+    unsigned char *data;
+} BMPIMAGE;
+
+static void free_bmp(BMPIMAGE *img) {
+    if (!img) return;
+    free(img->palette);
+    free(img->data);
+    free(img);
+}
+
+static int row_padding(int width, int bpp) {
+    int bytes_per_row = (width * bpp + 7) / 8;
+    return (4 - (bytes_per_row % 4)) % 4;
+}
+
+static BMPIMAGE *read_bmp(const char *path) {
+    FILE *fp = fopen(path, "rb");
+    if (!fp) return NULL;
+
+    BMPIMAGE *img = (BMPIMAGE *)calloc(1, sizeof(BMPIMAGE));
+    if (!img) { fclose(fp); return NULL; }
+
+    if (fread(&img->fileHeader, sizeof(BITMAPFILEHEADER), 1, fp) != 1) {
+        fclose(fp); free_bmp(img); return NULL;
+    }
+    if (fread(&img->infoHeader, sizeof(BITMAPINFOHEADER), 1, fp) != 1) {
+        fclose(fp); free_bmp(img); return NULL;
+    }
+
+    if (img->fileHeader.bfType != 0x4D42) {
+        fclose(fp); free_bmp(img); return NULL;
+    }
+
+    if (img->infoHeader.biCompression != 0) {
+        fclose(fp); free_bmp(img); return NULL;
+    }
+
+    int bpp = img->infoHeader.biBitCount;
+    if (bpp != 24 && bpp != 8) {
+        fclose(fp); free_bmp(img); return NULL;
+    }
+
+    if (bpp == 8) {
+        uint32_t palette_size = img->infoHeader.biClrUsed;
+        if (palette_size == 0) palette_size = 256;
+        img->palette = (unsigned char *)malloc(palette_size * 4);
+        if (!img->palette) { fclose(fp); free_bmp(img); return NULL; }
+        if (fread(img->palette, 4, palette_size, fp) != palette_size) {
+            fclose(fp); free_bmp(img); return NULL;
+        }
+    }
+
+    if (fseek(fp, img->fileHeader.bfOffBits, SEEK_SET) != 0) {
+        fclose(fp); free_bmp(img); return NULL;
+    }
+
+    int width = img->infoHeader.biWidth;
+    int height = abs(img->infoHeader.biHeight);
+    int padding = row_padding(width, bpp);
+    int bytes_per_row = (width * bpp + 7) / 8;
+
+    img->data = (unsigned char *)malloc((bytes_per_row + padding) * height);
+    if (!img->data) { fclose(fp); free_bmp(img); return NULL; }
+
+    if (fread(img->data, 1, (bytes_per_row + padding) * height, fp) != (size_t)((bytes_per_row + padding) * height)) {
+        fclose(fp); free_bmp(img); return NULL;
+    }
+
+    fclose(fp);
+    return img;
+}
+
+static int write_bmp(const char *path, const BMPIMAGE *img) {
+    FILE *fp = fopen(path, "wb");
+    if (!fp) return 0;
+
+    if (fwrite(&img->fileHeader, sizeof(BITMAPFILEHEADER), 1, fp) != 1) { fclose(fp); return 0; }
+    if (fwrite(&img->infoHeader, sizeof(BITMAPINFOHEADER), 1, fp) != 1) { fclose(fp); return 0; }
+
+    if (img->infoHeader.biBitCount == 8) {
+        uint32_t palette_size = img->infoHeader.biClrUsed;
+        if (palette_size == 0) palette_size = 256;
+        if (fwrite(img->palette, 4, palette_size, fp) != palette_size) { fclose(fp); return 0; }
+    }
+
+    int width = img->infoHeader.biWidth;
+    int height = abs(img->infoHeader.biHeight);
+    int bpp = img->infoHeader.biBitCount;
+    int padding = row_padding(width, bpp);
+    int bytes_per_row = (width * bpp + 7) / 8;
+
+    if (fwrite(img->data, 1, (bytes_per_row + padding) * height, fp) != (size_t)((bytes_per_row + padding) * height)) { fclose(fp); return 0; }
+
+    fclose(fp);
+    return 1;
+}
+
+static unsigned char get_pixel_8(const BMPIMAGE *img, int x, int y) {
+    int width = img->infoHeader.biWidth;
+    int height = abs(img->infoHeader.biHeight);
+    int bpp = img->infoHeader.biBitCount;
+    int padding = row_padding(width, bpp);
+    int bytes_per_row = (width * bpp + 7) / 8;
+
+    if (x < 0) x = 0;
+    if (x >= width) x = width - 1;
+    if (y < 0) y = 0;
+    if (y >= height) y = height - 1;
+
+    int row = (img->infoHeader.biHeight > 0) ? (height - 1 - y) : y;
+    return img->data[row * (bytes_per_row + padding) + x];
+}
+
+static void set_pixel_8(BMPIMAGE *img, int x, int y, unsigned char value) {
+    int width = img->infoHeader.biWidth;
+    int height = abs(img->infoHeader.biHeight);
+    int bpp = img->infoHeader.biBitCount;
+    int padding = row_padding(width, bpp);
+    int bytes_per_row = (width * bpp + 7) / 8;
+
+    int row = (img->infoHeader.biHeight > 0) ? (height - 1 - y) : y;
+    img->data[row * (bytes_per_row + padding) + x] = value;
+}
+
+static void get_pixel_24(const BMPIMAGE *img, int x, int y, unsigned char *bgr) {
+    int width = img->infoHeader.biWidth;
+    int height = abs(img->infoHeader.biHeight);
+    int bpp = img->infoHeader.biBitCount;
+    int padding = row_padding(width, bpp);
+    int bytes_per_row = (width * bpp + 7) / 8;
+
+    if (x < 0) x = 0;
+    if (x >= width) x = width - 1;
+    if (y < 0) y = 0;
+    if (y >= height) y = height - 1;
+
+    int row = (img->infoHeader.biHeight > 0) ? (height - 1 - y) : y;
+    unsigned char *p = img->data + row * (bytes_per_row + padding) + x * 3;
+    bgr[0] = p[0];
+    bgr[1] = p[1];
+    bgr[2] = p[2];
+}
+
+static void set_pixel_24(BMPIMAGE *img, int x, int y, const unsigned char *bgr) {
+    int width = img->infoHeader.biWidth;
+    int height = abs(img->infoHeader.biHeight);
+    int bpp = img->infoHeader.biBitCount;
+    int padding = row_padding(width, bpp);
+    int bytes_per_row = (width * bpp + 7) / 8;
+
+    int row = (img->infoHeader.biHeight > 0) ? (height - 1 - y) : y;
+    unsigned char *p = img->data + row * (bytes_per_row + padding) + x * 3;
+    p[0] = bgr[0];
+    p[1] = bgr[1];
+    p[2] = bgr[2];
+}
+
+static BMPIMAGE *create_mirror(const BMPIMAGE *src, int vertical) {
+    int src_w = src->infoHeader.biWidth;
+    int src_h = abs(src->infoHeader.biHeight);
+    int bpp = src->infoHeader.biBitCount;
+
+    BMPIMAGE *dst = (BMPIMAGE *)calloc(1, sizeof(BMPIMAGE));
+    if (!dst) return NULL;
+
+    dst->fileHeader = src->fileHeader;
+    dst->infoHeader = src->infoHeader;
+
+    int padding = row_padding(src_w, bpp);
+    int bytes_per_row = (src_w * bpp + 7) / 8;
+    dst->infoHeader.biSizeImage = (bytes_per_row + padding) * src_h;
+    dst->fileHeader.bfSize = dst->fileHeader.bfOffBits + dst->infoHeader.biSizeImage;
+
+    if (bpp == 8) {
+        uint32_t palette_size = src->infoHeader.biClrUsed;
+        if (palette_size == 0) palette_size = 256;
+        dst->palette = (unsigned char *)malloc(palette_size * 4);
+        if (!dst->palette) { free_bmp(dst); return NULL; }
+        memcpy(dst->palette, src->palette, palette_size * 4);
+        dst->infoHeader.biClrUsed = palette_size;
+    }
+
+    dst->data = (unsigned char *)calloc(1, dst->infoHeader.biSizeImage);
+    if (!dst->data) { free_bmp(dst); return NULL; }
+
+    if (bpp == 8) {
+        for (int y = 0; y < src_h; ++y) {
+            for (int x = 0; x < src_w; ++x) {
+                int sx = vertical ? x : (src_w - 1 - x);
+                int sy = vertical ? (src_h - 1 - y) : y;
+                unsigned char value = get_pixel_8(src, sx, sy);
+                set_pixel_8(dst, x, y, value);
+            }
+        }
+    } else {
+        for (int y = 0; y < src_h; ++y) {
+            for (int x = 0; x < src_w; ++x) {
+                int sx = vertical ? x : (src_w - 1 - x);
+                int sy = vertical ? (src_h - 1 - y) : y;
+                unsigned char bgr[3];
+                get_pixel_24(src, sx, sy, bgr);
+                set_pixel_24(dst, x, y, bgr);
+            }
+        }
+    }
+
+    return dst;
+}
+
+static void print_usage(void) {
+    printf("Usage:\n");
+    printf("  imgproc -m input.bmp -v|-h output.bmp\n");
+}
+
+int main(int argc, char *argv[]) {
+    if (argc != 5) {
+        print_usage();
+        return 1;
+    }
+
+    if (strcmp(argv[1], "-m") != 0) {
+        print_usage();
+        return 1;
+    }
+
+    const char *input = argv[2];
+    int vertical = 0;
+    if (strcmp(argv[3], "-v") == 0) {
+        vertical = 1;
+    } else if (strcmp(argv[3], "-h") == 0) {
+        vertical = 0;
+    } else {
+        print_usage();
+        return 1;
+    }
+
+    const char *output = argv[4];
+
+    BMPIMAGE *src = read_bmp(input);
+    if (!src) {
+        fprintf(stderr, "Failed to read BMP: %s\n", input);
+        return 1;
+    }
+
+    BMPIMAGE *dst = create_mirror(src, vertical);
+    if (!dst) {
+        fprintf(stderr, "Failed to mirror image.\n");
+        free_bmp(src);
+        return 1;
+    }
+
+    if (!write_bmp(output, dst)) {
+        fprintf(stderr, "Failed to write BMP: %s\n", output);
+        free_bmp(src);
+        free_bmp(dst);
+        return 1;
+    }
+
+    free_bmp(src);
+    free_bmp(dst);
+    return 0;
+}
