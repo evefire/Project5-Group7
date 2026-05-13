@@ -3,6 +3,13 @@
 #include <string.h>
 #include <stdint.h>
 
+/*
+ * 模块说明：BMP 旋转程序（imgproc -r）
+ * 目的：读取 8/24 位无压缩 BMP，按指定角度顺时针旋转并保存。
+ * 思路：读取 BMP -> 根据角度计算目标尺寸 -> 像素坐标映射。
+ * 最小功能：支持 -r input.bmp 0|90|180|270 output.bmp。
+ */
+
 #pragma pack(push,1)
 typedef struct {
     uint16_t bfType;
@@ -27,6 +34,7 @@ typedef struct {
 } BITMAPINFOHEADER;
 #pragma pack(pop)
 
+/* BMP 图像容器：包含文件头、信息头、调色板与像素数据 */
 typedef struct {
     BITMAPFILEHEADER fileHeader;
     BITMAPINFOHEADER infoHeader;
@@ -34,6 +42,7 @@ typedef struct {
     unsigned char *data;
 } BMPIMAGE;
 
+/* 释放 BMP 相关内存 */
 static void free_bmp(BMPIMAGE *img) {
     if (!img) return;
     free(img->palette);
@@ -41,11 +50,13 @@ static void free_bmp(BMPIMAGE *img) {
     free(img);
 }
 
+/* 计算 BMP 每行的字节填充（4 字节对齐） */
 static int row_padding(int width, int bpp) {
     int bytes_per_row = (width * bpp + 7) / 8;
     return (4 - (bytes_per_row % 4)) % 4;
 }
 
+/* 读取 BMP（仅支持 8/24 位、无压缩） */
 static BMPIMAGE *read_bmp(const char *path) {
     FILE *fp = fopen(path, "rb");
     if (!fp) return NULL;
@@ -103,6 +114,7 @@ static BMPIMAGE *read_bmp(const char *path) {
     return img;
 }
 
+/* 写出 BMP（保持输入的位深与调色板） */
 static int write_bmp(const char *path, const BMPIMAGE *img) {
     FILE *fp = fopen(path, "wb");
     if (!fp) return 0;
@@ -128,6 +140,7 @@ static int write_bmp(const char *path, const BMPIMAGE *img) {
     return 1;
 }
 
+/* 获取 8 位像素（自动裁剪边界） */
 static unsigned char get_pixel_8(const BMPIMAGE *img, int x, int y) {
     int width = img->infoHeader.biWidth;
     int height = abs(img->infoHeader.biHeight);
@@ -144,6 +157,7 @@ static unsigned char get_pixel_8(const BMPIMAGE *img, int x, int y) {
     return img->data[row * (bytes_per_row + padding) + x];
 }
 
+/* 设置 8 位像素 */
 static void set_pixel_8(BMPIMAGE *img, int x, int y, unsigned char value) {
     int width = img->infoHeader.biWidth;
     int height = abs(img->infoHeader.biHeight);
@@ -155,6 +169,7 @@ static void set_pixel_8(BMPIMAGE *img, int x, int y, unsigned char value) {
     img->data[row * (bytes_per_row + padding) + x] = value;
 }
 
+/* 获取 24 位像素（BGR） */
 static void get_pixel_24(const BMPIMAGE *img, int x, int y, unsigned char *bgr) {
     int width = img->infoHeader.biWidth;
     int height = abs(img->infoHeader.biHeight);
@@ -174,6 +189,7 @@ static void get_pixel_24(const BMPIMAGE *img, int x, int y, unsigned char *bgr) 
     bgr[2] = p[2];
 }
 
+/* 设置 24 位像素（BGR） */
 static void set_pixel_24(BMPIMAGE *img, int x, int y, const unsigned char *bgr) {
     int width = img->infoHeader.biWidth;
     int height = abs(img->infoHeader.biHeight);
@@ -188,6 +204,10 @@ static void set_pixel_24(BMPIMAGE *img, int x, int y, const unsigned char *bgr) 
     p[2] = bgr[2];
 }
 
+/*
+ * 旋转核心：根据角度映射源坐标到目标坐标。
+ * 最小功能：支持 0/90/180/270 四种角度。
+ */
 static BMPIMAGE *create_rotated(const BMPIMAGE *src, int angle) {
     int src_w = src->infoHeader.biWidth;
     int src_h = abs(src->infoHeader.biHeight);
